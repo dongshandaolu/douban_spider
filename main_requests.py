@@ -1,243 +1,338 @@
-import re
 import json
+import re
 import time
-import random
-import os
-import sqlite3
-import shutil
-import requests
+from typing import Any
+
 import pandas as pd
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+import requests
+from lxml import etree
 
-# ========== 全局配置 ==========
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36 Edg/127.0.0.0',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language': 'zh-CN,zh;q=0.9',
+from db import init_db, save_douban_top250_batch
+from settings import DATA_DIR, TIMEOUT
+from utils import get_logger, norm_text, random_delay
+
+logger = get_logger("main_requests", "logs/main_requests.log")
+
+cookies = {
+    "ll": '"118282"',
+    "bid": "qpeBkdWNQ30",
+    "__utma": "30149280.1285408772.1722931171.1722931171.1722931171.1",
+    "__utmc": "30149280",
+    "__utmz": "30149280.1722931171.1.1.utmcsr=cn.bing.com|utmccn=(referral)|utmcmd=referral|utmcct=/",
+    "__utmt": "1",
+    "__utmb": "30149280.1.10.1722931171",
+    "__utma": "223695111.549597820.1722931184.1722931184.1722931184.1",
+    "__utmb": "223695111.0.10.1722931184",
+    "__utmc": "223695111",
+    "__utmz": "223695111.1722931184.1.1.utmcsr=cn.bing.com|utmccn=(referral)|utmcmd=referral|utmcct=/",
+    "_pk_ref.100001.4cf6": "%5B%22%22%2C%22%22%2C1722931184%2C%22https%3A%2F%2Fcn.bing.com%2F%22%5D",
+    "_pk_id.100001.4cf6": "39e7e842a6abee49.1722931184.",
+    "_pk_ses.100001.4cf6": "1",
+    "ap_v": "0,6.0",
+    "__yadk_uid": "5tRoftzrzq0L8EylRtLcRgAgQ8c6kVkb",
 }
-REQUEST_DELAY = (1.5, 3.5)
 
-# 创建数据文件夹
-os.makedirs('data', exist_ok=True)
-os.makedirs('images', exist_ok=True)
+headers = {
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+    "accept-language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
+    "priority": "u=0, i",
+    "referer": "https://movie.douban.com/top250",
+    "sec-ch-ua": '"Not)A;Brand";v="99", "Microsoft Edge";v="127", "Chromium";v="127"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-dest": "document",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-site": "same-origin",
+    "sec-fetch-user": "?1",
+    "upgrade-insecure-requests": "1",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36 Edg/127.0.0.0",
+}
+
+COLUMNS_ZH = [
+    "电影名",
+    "年份",
+    "导演",
+    "编剧",
+    "主演",
+    "地区",
+    "剧情",
+    "语言",
+    "又名",
+    "评分",
+    "剧情介绍",
+    "评论数",
+    "海报地址",
+]
 
 
-def get_session():
-    """创建带重试机制的会话，提高稳定性"""
-    session = requests.Session()
-    retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount('http://', adapter)
-    session.mount('https://', adapter)
-    session.headers.update(HEADERS)
-    return session
+def _xpath_first(html: Any, xp: str, default: str = "") -> str:
+    nodes = html.xpath(xp)
+    if not nodes:
+        return default
+    val = nodes[0]
+    if isinstance(val, etree._Element):
+        t = val.xpath("string(.)")
+        return norm_text(t) if t else default
+    return norm_text(str(val)) if val is not None else default
 
 
-def safe_xpath_first(tree, xpath, default=''):
-    """安全获取第一个XPath结果，避免IndexError"""
-    result = tree.xpath(xpath)
-    return result[0].strip() if result else default
+def _actors_from_ld_json(html_text: str) -> list[str]:
+    blocks = re.findall(
+        r'<script type="application/ld\+json">(.*?)</script>',
+        html_text,
+        re.DOTALL,
+    )
+    for raw in blocks:
+        raw = raw.replace("\n", "").replace("\r", "").replace("\t", "")
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        actors_raw = data.get("actor")
+        if not actors_raw:
+            continue
+        if isinstance(actors_raw, dict):
+            name = actors_raw.get("name")
+            return [name] if name else []
+        out: list[str] = []
+        for act in actors_raw:
+            if isinstance(act, dict) and act.get("name"):
+                out.append(act["name"])
+        return out
+    return []
 
 
-def sanitize_filename(filename):
-    """清理文件名中的特殊字符，避免保存失败"""
-    illegal_chars = r'[\/:*?"<>|]'
-    return re.sub(illegal_chars, '_', filename)
-
-
-def download_poster(session, image_url, movie_name, year):
-    """下载海报图片到images文件夹"""
-    if not image_url:
-        print(f'    无海报地址，跳过下载')
-        return
-
-    # 生成安全的文件名
-    safe_name = sanitize_filename(f'{movie_name}_{year}')
-    # 提取图片后缀
-    ext = image_url.split('.')[-1]
-    if len(ext) > 5:  # 防止后缀异常（比如带参数）
-        ext = 'jpg'
-    save_path = f'images/{safe_name}.{ext}'
-
+def _parse_info_region_language_alias(html2: etree._Element) -> tuple[str, str, str]:
+    """从 #info 的纯文本节点解析地区、语言、又名（与豆瓣常见排版一致）。"""
+    temps = html2.xpath('//*[@id="info"]/text()')
+    new_temp: list[str] = []
+    for temp in temps:
+        temp = (temp or "").replace(" ", "")
+        if ("\n" not in temp) and (temp != "/") and (temp != ""):
+            new_temp.append(temp)
+    area, language, alias = "", "", ""
     try:
-        resp = session.get(image_url, timeout=10, stream=True)
-        resp.raise_for_status()
-        with open(save_path, 'wb') as f:
-            shutil.copyfileobj(resp.raw, f)
-        print(f'    海报已保存至: {save_path}')
-    except Exception as e:
-        print(f'    海报下载失败 {image_url}: {e}')
+        area = new_temp[0]
+        language = new_temp[1]
+        alias = new_temp[-2] if len(new_temp) >= 2 else ""
+    except IndexError:
+        pass
+    return area, language, alias
 
 
-def parse_movie_detail(session, url):
-    """解析单部电影详情页，返回字段字典"""
-    # 随机延时，降低请求频率
-    time.sleep(random.uniform(*REQUEST_DELAY))
-
+def scrape_one_detail(href: str, rank_num: int) -> dict[str, Any] | None:
+    random_delay()
     try:
-        resp = session.get(url, timeout=10)
-        resp.raise_for_status()
-    except Exception as e:
-        print(f'请求失败 {url}: {e}')
+        response = requests.get(
+            href, cookies=cookies, headers=headers, timeout=TIMEOUT
+        )
+        response.raise_for_status()
+    except requests.RequestException as e:
+        logger.warning("请求详情失败 %s: %s", href, e)
         return None
 
-    # 解析HTML
-    from lxml import etree
-    tree = etree.HTML(resp.text)
+    html2 = etree.HTML(response.text)
+    if html2 is None:
+        return None
 
-    # ---------- 从 JSON-LD 提取元数据 ----------
-    ld_json = re.search(r'<script type="application/ld\+json">(.*?)</script>', resp.text, re.DOTALL)
-    meta = {}
-    if ld_json:
-        try:
-            meta = json.loads(ld_json.group(1))
-        except Exception:
-            meta = {}
+    title = _xpath_first(html2, '//*[@id="content"]/h1/span[1]/text()')
+    if not title:
+        logger.warning("无标题，跳过: %s", href)
+        return None
 
-    # 电影名
-    title = meta.get('name', '') or safe_xpath_first(tree, '//span[@property="v:itemreviewed"]/text()')
-    # 年份
-    year = ''
-    date_pub = meta.get('datePublished', '')
-    if date_pub:
-        year = str(date_pub)[:4]
-    if not year:
-        year_raw = safe_xpath_first(tree, '//span[@class="year"]/text()')
-        year_match = re.search(r'\d{4}', year_raw)
-        if year_match:
-            year = year_match.group()
+    year_raw = _xpath_first(html2, '//*[@id="content"]/h1/span[2]/text()')
+    year = year_raw[1:-1] if len(year_raw) >= 2 else year_raw
 
-    rating = meta.get('aggregateRating', {}).get('ratingValue', '')
-    if not rating:
-        rating = safe_xpath_first(tree, '//strong[@property="v:average"]/text()')
+    director = _xpath_first(html2, '//*[@id="info"]/span[1]/span[2]/a/text()')
+    writer_nodes = html2.xpath('//*[@id="info"]/span[2]/span[2]/a/text()')
+    writer = writer_nodes[0] if writer_nodes else ""
 
-    directors = meta.get('director', [])
-    if isinstance(directors, list):
-        director = ', '.join([d.get('name', '') for d in directors if d.get('name')])
-    else:
-        director = safe_xpath_first(tree, "//span[contains(text(),'导演')]/following-sibling::span[1]//a/text()")
+    plot = _xpath_first(html2, '//*[@id="info"]/span[5]/text()')
+    score = _xpath_first(
+        html2, '//*[@id="interest_sectl"]/div[1]/div[2]/strong/text()'
+    )
 
-    actors = meta.get('actor', [])
-    actor_names = [a.get('name', '') for a in actors if a.get('name')]
-    actors_str = ', '.join(actor_names)
-    # 类型
-    genres = meta.get('genre', [])
-    if genres:
-        plot = ' / '.join(genres)
-    else:
-        genre_spans = tree.xpath('//span[@property="v:genre"]/text()')
-        plot = ' / '.join([g.strip() for g in genre_spans])
-    # 海报
-    image_url = meta.get('image', '') or safe_xpath_first(tree, '//*[@id="mainpic"]/a/img/@src')
+    synopsis_parts = html2.xpath('//*[@id="link-report-intra"]//text()')
+    synopsis = norm_text("".join(synopsis_parts))
 
-    # ---------- 页面字段（JSON里没有的）----------
-    # 编剧
-    writer = safe_xpath_first(tree, "//span[contains(text(),'编剧')]/following-sibling::span[1]//a/text()")
-    # 地区
-    area = safe_xpath_first(tree, "//span[contains(text(),'制片国家/地区')]/following-sibling::text()[1]")
-    if not area:
-        area_texts = tree.xpath('//*[@id="info"]/text()')
-        area = next((t.strip() for t in area_texts if t.strip() and '/' not in t and ':' not in t), '')
+    comment_raw = _xpath_first(
+        html2, '//*[@id="comments-section"]/div[1]/h2/span/a/text()'
+    )
+    comment_number = ""
+    if comment_raw:
+        parts = comment_raw.split()
+        if len(parts) >= 2:
+            comment_number = parts[1]
 
-    language = safe_xpath_first(tree, "//span[contains(text(),'语言')]/following-sibling::text()[1]")
+    image_url = _xpath_first(html2, '//*[@id="mainpic"]/a/img/@src')
 
-    alias = safe_xpath_first(tree, "//span[contains(text(),'又名')]/following-sibling::text()[1]")
-    # 简介
-    synopsis_list = tree.xpath('//*[@id="link-report-intra"]/span/text()')
-    synopsis = ' '.join([s.strip() for s in synopsis_list if s.strip()])
-
-    comment_text = safe_xpath_first(tree, '//*[@id="comments-section"]/div[1]/h2/span/a/text()')
-    comment_number = ''
-    if comment_text:
-        num_match = re.search(r'\d+', comment_text.replace(',', ''))
-        if num_match:
-            comment_number = num_match.group()
-
-    # 下载海报
-    download_poster(session, image_url, title, year)
+    area, language, alias = _parse_info_region_language_alias(html2)
+    actors_list = _actors_from_ld_json(response.text)
+    actors_str = json.dumps(actors_list, ensure_ascii=False)
 
     return {
-        '电影名': title,
-        '年份': year,
-        '导演': director,
-        '编剧': writer,
-        '主演': actors_str,
-        '地区': area,
-        '剧情': plot,
-        '语言': language,
-        '又名': alias,
-        '评分': rating,
-        '剧情介绍': synopsis,
-        '评论数': comment_number,
-        '海报地址': image_url,
+        "title": title,
+        "detail_url": href,
+        "year": year,
+        "director": director,
+        "writer": writer,
+        "actors": actors_str,
+        "area": area,
+        "plot": plot,
+        "language": language,
+        "alias": alias,
+        "score": score,
+        "synopsis": synopsis,
+        "comment_number": comment_number,
+        "image_url": image_url,
+        "rank_num": rank_num,
+        "_actors_list": actors_list,
     }
 
 
-def crawl_douban_top250():
-    """爬取豆瓣TOP250全部电影信息"""
-    session = get_session()
-    all_data = []
+def acquire_page(page_start: int, rank_counter: list[int]) -> list[dict[str, Any]]:
+    """爬取 Top250 某一列表页上的所有详情。"""
+    params = {"start": str(page_start), "filter": ""}
+    random_delay()
+    try:
+        response = requests.get(
+            "https://movie.douban.com/top250",
+            params=params,
+            cookies=cookies,
+            headers=headers,
+            timeout=TIMEOUT,
+        )
+        response.raise_for_status()
+    except requests.RequestException as e:
+        logger.error("列表页失败 start=%s: %s", page_start, e)
+        return []
 
-    for page_start in range(0, 250, 25):
-        page_no = page_start // 25 + 1
-        print(f'正在抓取第 {page_no} 页 (start={page_start})')
-        params = {'start': page_start, 'filter': ''}
-        try:
-            resp = session.get('https://movie.douban.com/top250', params=params, timeout=10)
-            resp.raise_for_status()
-        except Exception as e:
-            print(f'列表页请求失败: {e}')
+    html = etree.HTML(response.text)
+    if html is None:
+        return []
+
+    hrefs = html.xpath(
+        '//*[@id="content"]/div/div[1]/ol/li/div/div[2]/div[1]/a/@href'
+    )
+    rows: list[dict[str, Any]] = []
+    for href in hrefs:
+        rank_counter[0] += 1
+        row = scrape_one_detail(href, rank_counter[0])
+        if row is None:
             continue
-
-        from lxml import etree
-        tree = etree.HTML(resp.text)
-        hrefs = tree.xpath('//*[@id="content"]/div/div[1]/ol/li/div/div[2]/div[1]/a/@href')
-        print(f'找到 {len(hrefs)} 部电影链接')
-
-        for href in hrefs:
-            print(f'  正在处理 {href}')
-            movie = parse_movie_detail(session, href)
-            if movie:
-                all_data.append(movie)
-                print(f'    电影名: {movie["电影名"]}, 评分: {movie["评分"]}')
-
-    return all_data
+        rows.append(row)
+        logger.info("已采集 %s", row["title"])
+    return rows
 
 
-def save_data(all_data):
-    if not all_data:
-        print('无数据可保存')
+def save_outputs(rows: list[dict[str, Any]]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    path_csv = DATA_DIR / "movie.csv"
+    path_json = DATA_DIR / "movie.json"
+    path_db = DATA_DIR / "movie.db"
+
+    for r in rows:
+        r.pop("_actors_list", None)
+
+    table_rows = []
+    for r in rows:
+        table_rows.append(
+            {
+                "title": r["title"],
+                "detail_url": r.get("detail_url", ""),
+                "year": r.get("year", ""),
+                "director": r.get("director", ""),
+                "writer": r.get("writer", ""),
+                "actors": r.get("actors", "[]"),
+                "area": r.get("area", ""),
+                "plot": r.get("plot", ""),
+                "language": r.get("language", ""),
+                "alias": r.get("alias", ""),
+                "score": r.get("score", ""),
+                "synopsis": r.get("synopsis", ""),
+                "comment_number": r.get("comment_number", ""),
+                "image_url": r.get("image_url", ""),
+                "rank_num": r.get("rank_num"),
+            }
+        )
+
+    list_for_files = []
+    for r in rows:
+        actors_parsed = json.loads(r.get("actors") or "[]")
+        actors_csv = " / ".join(actors_parsed) if isinstance(actors_parsed, list) else ""
+        list_for_files.append(
+            [
+                r["title"],
+                r.get("year", ""),
+                r.get("director", ""),
+                r.get("writer", ""),
+                actors_csv,
+                r.get("area", ""),
+                r.get("plot", ""),
+                r.get("language", ""),
+                r.get("alias", ""),
+                r.get("score", ""),
+                r.get("synopsis", ""),
+                r.get("comment_number", ""),
+                r.get("image_url", ""),
+            ]
+        )
+
+    df = pd.DataFrame(list_for_files, columns=COLUMNS_ZH)
+    df.to_csv(path_csv, index=False, encoding="utf-8-sig")
+
+    json_records = []
+    for r in rows:
+        json_records.append(
+            {
+                "电影名": r["title"],
+                "年份": r.get("year", ""),
+                "导演": r.get("director", ""),
+                "编剧": r.get("writer", ""),
+                "主演": json.loads(r.get("actors") or "[]"),
+                "地区": r.get("area", ""),
+                "剧情": r.get("plot", ""),
+                "语言": r.get("language", ""),
+                "又名": r.get("alias", ""),
+                "评分": r.get("score", ""),
+                "剧情介绍": r.get("synopsis", ""),
+                "评论数": r.get("comment_number", ""),
+                "海报地址": r.get("image_url", ""),
+                "详情链接": r.get("detail_url", ""),
+                "排名": r.get("rank_num"),
+            }
+        )
+    path_json.write_text(
+        json.dumps(json_records, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    init_db()
+    save_douban_top250_batch(table_rows, replace_all=True)
+    logger.info(
+        "已写入 %s、%s；SQLite 表 douban_top250 -> %s",
+        path_csv,
+        path_json,
+        path_db,
+    )
+
+
+def main() -> None:
+    all_rows: list[dict[str, Any]] = []
+    rank_counter = [0]
+    for i in range(0, 250, 25):
+        logger.info("-------- 第 %s 页 ---------", i // 25 + 1)
+        all_rows.extend(acquire_page(i, rank_counter))
+        time.sleep(1)
+
+    if not all_rows:
+        logger.error("未获取到任何数据")
         return
 
-    df = pd.DataFrame(all_data)
-    column_order = ['电影名', '年份', '导演', '编剧', '主演', '地区', '剧情', '语言', '又名', '评分', '剧情介绍',
-                    '评论数', '海报地址']
-    df = df[column_order]
-
-    # 1. 保存为CSV
-    csv_path = 'data/movie.csv'
-    df.to_csv(csv_path, index=False, encoding='utf-8-sig')
-    print(f'\nCSV文件已保存至: {csv_path}')
-
-    # 2. 保存为JSON
-    json_path = 'data/movie.json'
-    with open(json_path, 'w', encoding='utf-8') as f:
-        json.dump(all_data, f, ensure_ascii=False, indent=4)
-    print(f'JSON文件已保存至: {json_path}')
-
-    # 3. 保存为SQLite数据库
-    db_path = 'data/movie.db'
-    conn = sqlite3.connect(db_path)
-    df.to_sql('movie_top250', conn, if_exists='replace', index=False)
-    conn.commit()
-    conn.close()
-    print(f'SQLite数据库已保存至: {db_path}')
+    save_outputs(all_rows)
+    print(f"共 {len(all_rows)} 条，已保存到 {DATA_DIR / 'movie.csv'} 等文件。")
 
 
-if __name__ == '__main__':
-    movies_data = crawl_douban_top250()
-    if movies_data:
-        save_data(movies_data)
-    else:
-        print('未获取到任何数据，请检查网络或页面结构')
+if __name__ == "__main__":
+    main()
