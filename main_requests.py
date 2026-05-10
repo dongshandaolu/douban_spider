@@ -61,7 +61,6 @@ def download_poster(session, image_url, movie_name, year):
     save_path = f'images/{safe_name}.{ext}'
 
     try:
-        # 流式下载，避免大文件占用内存
         resp = session.get(image_url, timeout=10, stream=True)
         resp.raise_for_status()
         with open(save_path, 'wb') as f:
@@ -193,7 +192,6 @@ def crawl_douban_top250():
 
         from lxml import etree
         tree = etree.HTML(resp.text)
-        # 获取本页25部电影详情链接
         hrefs = tree.xpath('//*[@id="content"]/div/div[1]/ol/li/div/div[2]/div[1]/a/@href')
         print(f'找到 {len(hrefs)} 部电影链接')
 
@@ -202,14 +200,12 @@ def crawl_douban_top250():
             movie = parse_movie_detail(session, href)
             if movie:
                 all_data.append(movie)
-                # 预览一条
                 print(f'    电影名: {movie["电影名"]}, 评分: {movie["评分"]}')
 
     return all_data
 
 
 def save_data(all_data):
-    """保存数据到data文件夹（CSV/JSON/SQLite）"""
     if not all_data:
         print('无数据可保存')
         return
