@@ -20,3 +20,6 @@ PROXIES = []
 TIMEOUT = 12
 RETRY = 3
 DELAY_RANGE = (1, 3)
+
+# 豆瓣反爬：可在浏览器登录豆瓣后，从开发者工具复制完整 Cookie 字符串设置到环境变量（优先于脚本内默认 Cookie）
+DOUBAN_COOKIE_ENV = "DOUBAN_COOKIE"

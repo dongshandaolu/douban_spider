@@ -12,6 +12,9 @@ def download_with_resume(url, title, save_dir="images"):
     save_dir = Path(save_dir)
     save_dir.mkdir(exist_ok=True)
     path = save_dir / f"{safe_filename(title)}.jpg"
+    # 断点续传：已有完整文件则跳过重新下载
+    if path.exists() and path.stat().st_size > 0:
+        return str(path)
     temp = str(path) + ".part"
 
     headers = random_headers()
