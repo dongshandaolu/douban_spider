@@ -1,0 +1,35 @@
+# 与 main_requests 中 headers / cookies 保持一致，供 Scrapy 中间件使用（可再通过环境变量 DOUBAN_COOKIE 覆盖合并）
+DOUBAN_HEADERS = {
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+    "accept-language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
+    "priority": "u=0, i",
+    "referer": "https://movie.douban.com/top250",
+    "sec-ch-ua": '"Not)A;Brand";v="99", "Microsoft Edge";v="127", "Chromium";v="127"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-dest": "document",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-site": "same-origin",
+    "sec-fetch-user": "?1",
+    "upgrade-insecure-requests": "1",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36 Edg/127.0.0.0",
+}
+
+DOUBAN_COOKIES = {
+    "__utmv": "30149280.29504",
+    "__utmz": "223695111.1778494997.8.3.utmcsr=cn.bing.com|utmccn=(referral)|utmcmd=referral|utmcct=/",
+    "_pk_id.100001.4cf6": "ec50f6087551a9c8.1778420889.",
+    "_pk_id.100001.8cb4": "6cffda50510a75ec.1777535510.",
+    "_pk_ref.100001.4cf6": '%5B%22%22%2C%22%22%2C1778494997%2C%22https%3A%2F%2Fcn.bing.com%2F%22%5D',
+    "_pk_ref.100001.8cb4": '%5B%22%22%2C%22%22%2C1778492534%2C%22https%3A%2F%2Fcn.bing.com%2F%22%5D',
+    "_pk_ses.100001.4cf6": "1",
+    "_vwo_uuid_v2": "DEF184B8F7AA48402AC538664313CDF9B|3ac3981632eca1ca44a50cd5f446df86",
+    "ap_v": "0,6.0",
+    "bid": "vqXR3IQIWws",
+    "ck": "HKYm",
+    "dbcl2": '"295041788:aj+6/Ksi+ig"',
+    "frodotk_db": '"7f629c1439d17cc57e27d43cad74764f"',
+    "ll": '"118254"',
+    "push_doumail_num": "0",
+    "push_noty_num": "0",
+}

@@ -1,25 +1,34 @@
-from pathlib import Path
+BOT_NAME = "moviebot"
+SPIDER_MODULES = ["moviebot.spiders"]
+NEWSPIDER_MODULE = "moviebot.spiders"
 
-BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-IMG_DIR = BASE_DIR / "images"
-LOG_DIR = BASE_DIR / "logs"
-OUT_DIR = BASE_DIR / "output"
+# 与 requests 版一致：不强制遵守 robots（main_requests 未检查 robots.txt）
+ROBOTSTXT_OBEY = False
 
-for p in [DATA_DIR, IMG_DIR, LOG_DIR, OUT_DIR]:
-    p.mkdir(exist_ok=True)
+CONCURRENT_REQUESTS = 8
+DOWNLOAD_DELAY = 1
+RANDOMIZE_DOWNLOAD_DELAY = True
+RETRY_TIMES = 3
+RETRY_HTTP_CODES = [500, 502, 503, 504, 522, 524, 408, 429, 403]
+LOG_LEVEL = "INFO"
 
-HEADERS_POOL = [
+# 消除 Scrapy 关于 REQUEST_FINGERPRINTER_IMPLEMENTATION 的弃用提示
+REQUEST_FINGERPRINTER_IMPLEMENTATION = "2.7"
+
+UA_LIST = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
 ]
 
-PROXIES = []
+PROXY_LIST = []
 
-TIMEOUT = 12
-RETRY = 3
-DELAY_RANGE = (1, 3)
+ITEM_PIPELINES = {
+    "moviebot.pipelines.DoubanTop250Pipeline": 250,
+    "moviebot.pipelines.SqlitePipeline": 300,
+}
 
-# 豆瓣反爬：可在浏览器登录豆瓣后，从开发者工具复制完整 Cookie 字符串设置到环境变量（优先于脚本内默认 Cookie）
-DOUBAN_COOKIE_ENV = "DOUBAN_COOKIE"
+DOWNLOADER_MIDDLEWARES = {
+    "moviebot.middlewares.RandomUserAgentMiddleware": 542,
+    "moviebot.middlewares.DoubanHeadersMiddleware": 543,
+    "moviebot.middlewares.SimpleProxyMiddleware": 544,
+}
